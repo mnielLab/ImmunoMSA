@@ -1,4 +1,6 @@
 import sys
+import pickle
+
 def split_list(input_list, num_sublists):
     """
     Split lists into a specified number of (num_sublists) list of lists
@@ -65,6 +67,10 @@ def read_accs_and_sequences_from_fasta(infile):
         if accs == False or sequences == False:
             sys.exit(f"No accessions or sequences found in fasta file. Please check file: {infile}")
 
-     
-
         return accs, sequences
+
+
+def load_pickle_file(infile_path):
+    with open(infile_path, "rb") as infile:
+        pickle_data = pickle.load(infile)
+    return pickle_data

@@ -7,7 +7,7 @@ import gzip
 import pandas as pd
 import pdb
 import sys
-SRC = Path(__file__).parents[1].resolve() / "immunomsa"
+SRC = Path(__file__).parents[2].resolve() / "immunomsa"
 sys.path.append( str(SRC) )
 from pdb_and_cif_utilities import read_pdb_structure, write_pdb_chain_seq
 from general_functions import split_list, read_accs_and_sequences_from_fasta
@@ -220,6 +220,13 @@ if run:
     unique_antibody_sequences = "\n".join(uniq_acc_and_seqs)
     with open(AB_DATADIR / "antibody_sequences_uniq.fasta", "w") as outfile: outfile.write(unique_antibody_sequences)
 
+# this step takes a very long time
+run = False
+if run:
+    antibody_sequences_fastafile = str(AB_DATADIR / "antibody_sequences_uniq.fasta")
+    cluster_results = str(AB_DATADIR / "ClusterRes")
+    subprocess.run(["mmseqs", "easy-cluster", antibody_sequences_fastafile, cluster_results, TMP, "--min-seq-id", "0.99", "-c", "0.8", "--cov-mode", "1"])
+
 # create mmseqs database
 run = False
 if run:
@@ -230,12 +237,10 @@ if run:
     if not mmmseqs_ab_database_preidx.is_dir(): mmmseqs_ab_database_preidx.mkdir(parents=True)
 
     # create mmseqs database
-    antibody_sequences_fastafile = str(AB_DATADIR / "antibody_sequences_uniq.fasta")
-    subprocess.run(["mmseqs", "createdb", antibody_sequences_fastafile, str(mmmseqs_ab_database_dir / "antibody_sequences_uniq_db")])
-
+    antibody_sequences_fastafile = str(AB_DATADIR / "ClusterRes_rep_seq.fasta")
+    subprocess.run(["mmseqs", "createdb", antibody_sequences_fastafile, str(mmmseqs_ab_database_dir / "antibody_db")])
+    
     # create mmseqs preprocessed index directory
     if not mmmseqs_ab_database_preidx.is_dir(): mmmseqs_ab_database_preidx.mkdir(parents=True)
     # create mmseqs preprocessed index
-    subprocess.run(["mmseqs", "createindex", str(mmmseqs_ab_database_dir / "antibody_sequences_uniq_db"), str(mmmseqs_ab_database_preidx)])
-
-# TODO jackhmmer
+    subprocess.run(["mmseqs", "createindex", str(mmmseqs_ab_database_dir / "antibody_db"), str(mmmseqs_ab_database_preidx)])
