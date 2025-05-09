@@ -9,7 +9,7 @@ import pdb
 import sys
 SRC = Path(__file__).parents[2].resolve() / "immunomsa"
 sys.path.append( str(SRC) )
-from pdb_and_cif_utilities import read_pdb_structure, write_pdb_chain_seq
+from pdb_and_cif_utilities import read_pdb_structure, write_pdb_chain_seq, AA3to1_DICT
 from general_functions import split_list, read_accs_and_sequences_from_fasta
 
 WORKDIR = Path(__file__).parent.resolve()
@@ -28,6 +28,28 @@ num_workers= 10
 # Finally, it combines all unique antibody sequnces, and creates an antibody mmseqs database
 
 ### FUNCTIONS ###
+
+
+
+def write_fasta(filename, accs, seqs):
+    with open(filename, "w") as f:
+        for acc, seq in zip(accs, seqs):
+            f.write(f">{acc}\n{seq}\n")
+
+def split_into_fasta_files(accs, seqs, output_dir, num_files=10):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    total = len(accs)
+    chunk_size = (total + num_files - 1) // num_files  # Ceiling division
+
+    for i in range(num_files):
+        start = i * chunk_size
+        end = min(start + chunk_size, total)
+        chunk_accs = accs[start:end]
+        chunk_seqs = seqs[start:end]
+        output_path = output_dir / f"split_{i+1}.fasta"
+        write_fasta(output_path, chunk_accs, chunk_seqs)
 
 def get_osa_data(osa_http_links_file, heavy_sequences_outpath, light_sequences_outpath):
     osa_http_links = []
@@ -90,7 +112,7 @@ def download_and_parse_osa_csv(link, tmpdir):
 
     return heavy_seqs, light_seqs, heavy_headers, light_headers, disease, species
 
-def extract_light_heavy_chains_from_sabdab_pdbs(sabdab_summaryfile, pdb_filedir, heavy_sequences_outpath, light_sequences_outpath):
+def extract_heavy_light_chains_from_sabdab_pdbs(sabdab_summaryfile, pdb_filedir, outdir):
 
     df = pd.read_csv(sabdab_summaryfile, sep='\t')
     pdb_paths = []
@@ -107,48 +129,73 @@ def extract_light_heavy_chains_from_sabdab_pdbs(sabdab_summaryfile, pdb_filedir,
 
     # split data into data lists + parrellize
     data_lists = split_list(data, num_workers)
-    datas = Parallel(n_jobs = num_workers)(delayed(get_light_heavy_chains_from_sabdab_pdb_wrapper)(data_list) for data_list in data_lists)
+    datas = Parallel(n_jobs = num_workers)(delayed(get_heavy_light_chains_from_sabdab_pdb_wrapper)(data_list) for data_list in data_lists)
 
-    heavy_seqs, light_seqs = [], []
+    # paired heavy and light chains ()
+    paired_heavy_seqs, paired_light_seqs = [], []
+    single_heavy_seqs, single_light_seqs = [], []
     for data in datas:
-        heavy_seqs.extend( [f"{acc}\n{seq}" for acc, seq in zip(data[2], data[0])] ) 
-        light_seqs.extend( [f"{acc}\n{seq}" for acc, seq in zip(data[3], data[1])] ) 
-        
-    
-    heavy_seqs = "\n".join(heavy_seqs)
-    light_seqs = "\n".join(light_seqs)
+        paired_heavy_seqs.extend( [f"{acc}\n{seq}" for acc, seq in zip(data[0], data[1])] ) 
+        paired_light_seqs.extend( [f"{acc}\n{seq}" for acc, seq in zip(data[2], data[3])] ) 
+        single_heavy_seqs.extend( [f"{acc}\n{seq}" for acc, seq in zip(data[4], data[5])] ) 
+        single_light_seqs.extend( [f"{acc}\n{seq}" for acc, seq in zip(data[6], data[7])] ) 
 
-    # write sequences
+    # write paired sequence files
+    heavy_seqs = "\n".join(paired_heavy_seqs)
+    light_seqs = "\n".join(paired_light_seqs)
+    heavy_sequences_outpath = outdir / "SABDAB_paired_heavy_sequences.fasta"
+    light_sequences_outpath = outdir / "SABDAB_paired_light_sequences.fasta"
+    with open(heavy_sequences_outpath, "w") as outfile: outfile.write(heavy_seqs)
+    with open(light_sequences_outpath, "w") as outfile: outfile.write(light_seqs)
+    
+    # write single heavy or light chains sequence files
+    heavy_seqs = "\n".join(single_heavy_seqs)
+    light_seqs = "\n".join(single_light_seqs)
+    heavy_sequences_outpath = outdir / "SABDAB_single_heavy_sequences.fasta"
+    light_sequences_outpath = outdir / "SABDAB_single_light_sequences.fasta"
     with open(heavy_sequences_outpath, "w") as outfile: outfile.write(heavy_seqs)
     with open(light_sequences_outpath, "w") as outfile: outfile.write(light_seqs)
 
 
-def get_light_heavy_chains_from_sabdab_pdb_wrapper(data):
+def get_heavy_light_chains_from_sabdab_pdb_wrapper(data):
   
     # extract sequences
-    heavy_seqs, light_seqs, heavy_headers, light_headers = [], [], [], []
+    paired_heavy_headers, paired_heavy_seqs, paired_light_headers, paired_light_seqs = [], [], [], []
+    single_heavy_headers, single_heavy_seqs, single_light_headers, single_light_seqs = [], [], [], []
+   
+    
+    
     N = len(data)
     for i in range(N):
         d = data[i]
         pdb_path, heavy_id, light_id, model_num = d
-        heavy_seq, light_seq, heavy_header, light_header = get_light_heavy_chains_from_sabdab_pdb(pdb_path, heavy_id, light_id, model_num)
-       
-        # append stuff
-        if heavy_seq:
-            heavy_seqs.append(heavy_seq)
-            heavy_headers.append(heavy_header)
-        
-        if light_seq:
-            light_seqs.append(light_seq)
-            light_headers.append(light_header)
+        heavy_seq, light_seq, heavy_header, light_header = get_heavy_light_chains_from_sabdab_pdb(pdb_path, heavy_id, light_id, model_num)
 
-        print(f"Collect antibody sequence from {i}/{N}")
+        # paired antibody sequences (both heavy and light chain were found)
+        if heavy_seq and light_seq:
+            paired_heavy_headers.append(heavy_header)
+            paired_heavy_seqs.append(heavy_seq)
+            paired_light_headers.append(light_header)
+            paired_light_seqs.append(light_seq)
+            
+        # only heavy chain was found
+        if heavy_seq and not light_seq:
+            single_heavy_headers.append(heavy_header)
+            single_heavy_seqs.append(heavy_seq)
+           
+        # only light chain was found
+        if light_seq and not heavy_seq:
+            single_light_headers.append(light_header)
+            single_light_seqs.append(light_seq)
+            
+  
+        print(f"Collect antibody sequence from {i+1}/{N}")
+
+    return (paired_heavy_headers, paired_heavy_seqs, paired_light_headers, paired_light_seqs,
+            single_heavy_headers, single_heavy_seqs, single_light_headers, single_light_seqs)
 
 
-    return heavy_seqs, light_seqs, heavy_headers, light_headers
-
-
-def get_light_heavy_chains_from_sabdab_pdb(pdb_file, heavy_id, light_id, model_num):
+def get_heavy_light_chains_from_sabdab_pdb(pdb_file, heavy_id, light_id, model_num):
 
     # get load light + heavy chain    
     pdb_structure = read_pdb_structure(pdb_file, pdb_id="foo", modelnr=model_num, return_all_models = False)
@@ -172,7 +219,7 @@ def get_light_heavy_chains_from_sabdab_pdb(pdb_file, heavy_id, light_id, model_n
 
     else: print(f"Light chain ID {light_id} not found in {pdb_file.stem}")
 
-   
+
     return heavy_seq, light_seq, heavy_header, light_header
     
 ### MAIN ###
@@ -183,64 +230,163 @@ if run: get_osa_data(OSA_HTTP_LINKS_FILE, AB_DATADIR / "OSA_heavy_sequences.fast
 
 ## get SABDAB sequences ##
 run = False
-if run: extract_light_heavy_chains_from_sabdab_pdbs(SABDAB_DATADIR / "sabdab_summary_all.tsv", SABDAB_PDBS, AB_DATADIR / "SABDAB_heavy_sequences.fasta", AB_DATADIR / "SABDAB_light_sequences.fasta" )
-    
+if run: extract_heavy_light_chains_from_sabdab_pdbs(SABDAB_DATADIR / "sabdab_summary_all.tsv", SABDAB_PDBS, AB_DATADIR)
+
+
 # concatanate all antibody sequences 
 run = False
 if run:
-
-    # 10x10 oas database antibody sequences
-    with open( AB_DATADIR / "OSA_heavy_sequences.fasta") as infile: osa_heavy = infile.read()
-    with open( AB_DATADIR / "OSA_light_sequences.fasta") as infile: osa_light = infile.read()
-
-    # strutural antibody sequences 
-    with open( AB_DATADIR / "SABDAB_heavy_sequences.fasta") as infile: sabdab_heavy = infile.read()
-    with open( AB_DATADIR / "SABDAB_light_sequences.fasta") as infile: sabdab_light = infile.read()
-
-    # write all antibody sequences to fasta
-    all_antibody_sequences = "\n".join( [osa_heavy, osa_light, sabdab_heavy, sabdab_light] )
-    with open(AB_DATADIR / "antibody_sequences.fasta", "w") as outfile: outfile.write(all_antibody_sequences)
-
-    # read accession IDs and sequences
-    accs, seqs = read_accs_and_sequences_from_fasta(AB_DATADIR / "antibody_sequences.fasta")
-
-    # pair and sort by sequence to group duplicates
-    sorted_acc_and_seqs = sorted(zip(accs, seqs), key=lambda x: x[1])
-
-    # use a dict to collect the first accession per unique sequence
-    seen = {}
-    for acc, seq in sorted_acc_and_seqs:
-        if seq not in seen:
-            seen[seq] = acc
-
-    uniq_acc_and_seqs = [f">{acc}\n{seq}" for seq, acc in seen.items()]
-    print(f"Number of unique antibody sequences: {len(uniq_acc_and_seqs)}")
     
-    # write unique antibody sequence ffasta file
-    unique_antibody_sequences = "\n".join(uniq_acc_and_seqs)
-    with open(AB_DATADIR / "antibody_sequences_uniq.fasta", "w") as outfile: outfile.write(unique_antibody_sequences)
+    # 10x10 oas database + sabdab structural paired antibody sequences 
+    osa_heavy_accs, osa_heavy_seqs = read_accs_and_sequences_from_fasta(AB_DATADIR / "OSA_heavy_sequences.fasta")
+    osa_light_accs, osa_light_seqs = read_accs_and_sequences_from_fasta(AB_DATADIR / "OSA_light_sequences.fasta")
+    
+    sabdab_heavy_accs, sabdab_heavy_seqs = read_accs_and_sequences_from_fasta(AB_DATADIR / "SABDAB_paired_heavy_sequences.fasta")
+    sabdab_light_accs, sabdab_light_seqs = read_accs_and_sequences_from_fasta(AB_DATADIR / "SABDAB_paired_light_sequences.fasta")
+    
+    # concatenate sequences
+    N1, N2 = len(osa_heavy_accs), len(sabdab_heavy_accs)
+    heavy_lights = ["".join([osa_heavy_seqs[i], osa_light_seqs[i]]) for i in range(N1)] + ["".join([sabdab_heavy_seqs[i], sabdab_light_seqs[i]]) for i in range(N2)]    
+    heavy_accs = osa_heavy_accs + sabdab_heavy_accs
+    heavy_seqs = osa_heavy_seqs + sabdab_heavy_seqs
+    light_accs = osa_light_accs + sabdab_light_accs
+    light_seqs = osa_light_seqs + sabdab_light_seqs
+    sorted_acc_and_seqs = sorted(zip(heavy_accs, heavy_seqs, light_accs, light_seqs, heavy_lights), key=lambda x: x[-1] ) 
+    
+    print(f"Paired antibody sequences: {len(sorted_acc_and_seqs)}")
 
-# this step takes a very long time
-run = False
-if run:
-    antibody_sequences_fastafile = str(AB_DATADIR / "antibody_sequences_uniq.fasta")
-    cluster_results = str(AB_DATADIR / "ClusterRes")
-    subprocess.run(["mmseqs", "easy-cluster", antibody_sequences_fastafile, cluster_results, TMP, "--min-seq-id", "0.99", "-c", "0.8", "--cov-mode", "1"])
+    unique_heavy, unique_light, unique_lightheavy = [], [], [] 
+    seen = set()
+    N = len(sorted_acc_and_seqs)
+    for i in range(N):
+        heavy_acc, heavy_seq, light_acc, light_seq, heavy_light = sorted_acc_and_seqs[i]
+        if heavy_light not in seen:
+            unique_heavy.append( f">{heavy_acc}_{i}\n{heavy_seq}" )
+            unique_light.append( f">{light_acc}_{i}\n{light_seq}" )
+            heavy_light_acc = "split".join([heavy_acc, light_acc])
+            unique_lightheavy.append(f">heavylight_{i}\n{heavy_light}")
+            seen.update( {heavy_light} )
+            
 
-# create mmseqs database
-run = False
-if run:
+    with open(AB_DATADIR / "paired_heavy_sequences.fasta", "w") as outfile: outfile.write("\n".join(unique_heavy) )
+    with open(AB_DATADIR / "paired_light_sequences.fasta", "w") as outfile: outfile.write("\n".join(unique_light) ) 
+    with open(AB_DATADIR / "heavylight_sequences.fasta", "w") as outfile: outfile.write("\n".join(unique_lightheavy) ) 
+    
 
-    # create mmseqs database directories
-    mmmseqs_ab_database_dir = AB_DATADIR / "mmseqs_antibody_db"
+    print(f"Paired antibody sequences after removing duplicates (antibodies with identical heavy + light chain): {len(seen)}")
+
+def run_mmmseqs_linclust(antibody_sequences_fastafile, linclust_out, cluster_outfile, tmp, seqid="0.99", coverage="0.8", covmode="1"):
+
+    # create database
+    if not linclust_out.is_dir(): linclust_out.mkdir(parents=True)
+    input_db_path = linclust_out  / "input_db"
+    subprocess.run(["mmseqs", "createdb", str(antibody_sequences_fastafile), str(input_db_path)])
+
+    # run mmmseqs linclust
+    result_db_path = linclust_out  / "result_db"
+    subprocess.run(["mmseqs", "linclust", str(input_db_path), str(result_db_path), str(tmp), "--min-seq-id", seqid, "-c", coverage, "--cov-mode", covmode] )
+
+    # extract the clusters
+    clus_db_path =  linclust_out  / "clustered_db"
+    subprocess.run(["mmseqs", "createseqfiledb", str(input_db_path), str(result_db_path), str(clus_db_path)])
+    subprocess.run(["mmseqs", "result2flat", str(input_db_path), str(input_db_path), str(clus_db_path), str(cluster_outfile)])
+
+    
+def extract_mmseq_cluster_representatives(mmseqs_clusterfile):
+
+
+    infile = open(mmseqs_clusterfile)
+    on_acc_line = False
+    cluster_representatives = []
+
+    for line in infile:
+
+        if line.startswith(">"):
+            acc = line
+            
+            # two consecutive acc lines = cluster rep
+            if on_acc_line:
+                cluster_representatives.append(acc.strip())
+                on_acc_line = False
+
+            else: on_acc_line = True
+
+
+    return cluster_representatives
+
+
+def write_paired_clustered_heavy_light(all_paired_heavy, all_paired_light, mmseqs_clusterfile, heavy_outfile, light_outfile, antibody_outfile):
+    
+    # read all heavy + light paired chains
+    heavy_accs, heavy_seqs = read_accs_and_sequences_from_fasta(all_paired_heavy)
+    light_accs, light_seqs = read_accs_and_sequences_from_fasta(all_paired_light)
+    N = len(heavy_accs)
+
+    cluster_representatives = extract_mmseq_cluster_representatives(mmseqs_clusterfile)
+    identifiers = set( [acc.split("_")[1] for acc in cluster_representatives] )
+    paired_heavy, paired_light, paired_antibody = [], [], []
+
+    for i in range(N):
+        heavy_acc, heavy_seq = heavy_accs[i], heavy_seqs[i]
+        light_acc, light_seq = light_accs[i], light_seqs[i] 
+        
+        identifier = heavy_acc.split("_")[-1]
+ 
+        if identifier in identifiers:
+            paired_antibody.extend( [f">{heavy_acc}_{i}\n{heavy_seq}", f">{light_acc}_{i}\n{light_seq}"] )
+            paired_heavy.append( f">{heavy_acc}_{i}\n{heavy_seq}" )
+            paired_light.append( f">{light_acc}_{i}\n{light_seq}" )
+
+    # write clustered paired heavy + light pairs
+    with open(heavy_outfile, "w") as outfile: outfile.write("\n".join(paired_heavy) )
+    with open(light_outfile, "w") as outfile: outfile.write("\n".join(paired_light) )
+
+    with open(antibody_outfile, "w") as outfile: outfile.write("\n".join(paired_antibody) )
+    
+
+def create_mmseqs_database(mmmseqs_ab_database_dir, antibody_sequences_fastafile):
+    
+    # create directories
     mmmseqs_ab_database_preidx = mmmseqs_ab_database_dir / "index_folder"
     if not mmmseqs_ab_database_preidx.is_dir(): mmmseqs_ab_database_preidx.mkdir(parents=True)
 
     # create mmseqs database
-    antibody_sequences_fastafile = str(AB_DATADIR / "ClusterRes_rep_seq.fasta")
-    subprocess.run(["mmseqs", "createdb", antibody_sequences_fastafile, str(mmmseqs_ab_database_dir / "antibody_db")])
-    
+    subprocess.run(["mmseqs", "createdb", antibody_sequences_fastafile, str(mmmseqs_ab_database_dir / "antibody_db")])    
     # create mmseqs preprocessed index directory
     if not mmmseqs_ab_database_preidx.is_dir(): mmmseqs_ab_database_preidx.mkdir(parents=True)
     # create mmseqs preprocessed index
     subprocess.run(["mmseqs", "createindex", str(mmmseqs_ab_database_dir / "antibody_db"), str(mmmseqs_ab_database_preidx)])
+
+run = False
+if run:
+    
+    # cluster conctatenated heavy+light paired chains
+    antibody_sequences_fastafile = str(AB_DATADIR / "heavylight_sequences.fasta")
+    run_mmmseqs_linclust(antibody_sequences_fastafile, TMP / "linclust99", TMP / "linclust99" / "clustered.fasta", TMP, seqid="0.99")
+    run_mmmseqs_linclust(antibody_sequences_fastafile, TMP / "linclust95", TMP / "linclust95" / "clustered.fasta", TMP, seqid="0.95")
+    run_mmmseqs_linclust(antibody_sequences_fastafile, TMP / "linclust90", TMP / "linclust90" / "clustered.fasta", TMP, seqid="0.9")
+    
+    # write antibody cluster represenatives 
+    write_paired_clustered_heavy_light(AB_DATADIR / "paired_heavy_sequences.fasta", AB_DATADIR / "paired_light_sequences.fasta", TMP / "linclust99" / "clustered.fasta",
+                                       AB_DATADIR / "paired_heavy_sequences99.fasta", AB_DATADIR / "paired_light_sequences99.fasta", AB_DATADIR / "paired_antibody_sequences99.fasta")
+    write_paired_clustered_heavy_light(AB_DATADIR / "paired_heavy_sequences.fasta", AB_DATADIR / "paired_light_sequences.fasta", TMP / "linclust95" / "clustered.fasta",
+                                       AB_DATADIR / "paired_heavy_sequences95.fasta", AB_DATADIR / "paired_light_sequences95.fasta", AB_DATADIR / "paired_antibody_sequences95.fasta")
+    write_paired_clustered_heavy_light(AB_DATADIR / "paired_heavy_sequences.fasta", AB_DATADIR / "paired_light_sequences.fasta", TMP / "linclust90" / "clustered.fasta",
+                                       AB_DATADIR / "paired_heavy_sequences90.fasta", AB_DATADIR / "paired_light_sequences90.fasta", AB_DATADIR / "paired_antibody_sequences90.fasta")
+
+    # clean up temporary files
+    for f in Path(TMP / "linclust99").glob("*"): f.unlink()
+    for f in Path(TMP / "linclust95").glob("*"): f.unlink()
+    for f in Path(TMP / "linclust90").glob("*"): f.unlink()
+    
+    # remove temporary directories
+    Path(TMP / "linclust99").rmdir()
+    Path(TMP / "linclust95").rmdir()
+    Path(TMP / "linclust90").rmdir()    
+
+# create mmseqs database
+run = False
+if run:
+    create_mmseqs_database(AB_DATADIR / "mmseqs_antibody_db99", AB_DATADIR / "paired_antibody_sequences99.fasta")
+    create_mmseqs_database(AB_DATADIR / "mmseqs_antibody_db95", AB_DATADIR / "paired_antibody_sequences95.fasta")
+    create_mmseqs_database(AB_DATADIR / "mmseqs_antibody_db90", AB_DATADIR / "paired_antibody_sequences90.fasta")
